@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "2.4.0"
+__version__ = "2.4.1"
 
 DEFAULT_SESSIONS_DIR = "/root/.codex/sessions"
 DEFAULT_ARCHIVED_DIR = "/root/.codex/archived_sessions"
@@ -637,7 +637,6 @@ def collect_sessions(
     index_entries = load_session_index_entries(source_roots)
     rg_matches = rg_file_matches(source_roots, fulltext_query, fulltext_regexes)
     indexed_candidate_ids: set[str] | None = None
-    query_rg_matches: set[Path] | None = None
     if (query or regexes) and not any((cwd_query, cwd_regexes, repo_query, repo_regexes, fulltext_query, fulltext_regexes)):
         matched_ids = {
             session_id
@@ -646,7 +645,6 @@ def collect_sessions(
         }
         if matched_ids:
             indexed_candidate_ids = matched_ids
-        query_rg_matches = rg_file_matches(source_roots, query, regexes)
     records: list[dict] = []
     seen_ids: set[str] = set()
     for source_name, path in iter_session_paths(source_roots):
@@ -663,8 +661,6 @@ def collect_sessions(
             continue
         if indexed_candidate_ids is not None and session_id_from_name:
             if session_id_from_name in index_entries and session_id_from_name not in indexed_candidate_ids:
-                continue
-            if session_id_from_name not in index_entries and query_rg_matches is not None and path.resolve() not in query_rg_matches:
                 continue
         record = session_info(path, source_name, index_entries=index_entries)
         if not include_untitled and record["title"] == "(untitled session)":

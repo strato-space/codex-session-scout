@@ -8,7 +8,7 @@
 - JSON output now includes `agent_type` and `agent_nickname` for automation.
 
 ### CHANGES
-- Bumped CLI version to `2.4.0`.
+- Bumped CLI version to `2.4.1`.
 - Documented `agent_type` semantics and updated default examples.
 
 ## 2026-04-07
