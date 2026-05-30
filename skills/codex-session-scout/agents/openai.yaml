@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Session Scout"
-  short_description: "Inspect Codex sessions, rollout activity, and cwd/repo context"
-  default_prompt: "Use $codex-session-scout to find active Codex sessions, inspect their status, filter by cwd/repo context, or fetch recent events."
+  short_description: "Inspect Codex sessions, rollout activity, and agent type plus cwd/repo context"
+  default_prompt: "Use $codex-session-scout to find active Codex sessions, inspect their status, filter by agent type plus cwd/repo context, or fetch recent events."

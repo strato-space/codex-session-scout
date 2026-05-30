@@ -11,7 +11,7 @@ Typical uses:
 
 - find the sessions that are active right now
 - locate a session by partial title, session id, cwd, or repo context
-- check whether a session is `running`, `completed`, or `stale`
+- check whether a session is `running`, `completed`, or `stale`, with default `agent_type` visibility
 - fetch a session and inspect the latest messages or raw events
 
 ## Commands
@@ -21,6 +21,8 @@ Run the bundled tool directly:
 ```bash
 uv run ~/.agents/skills/codex-session-scout/scripts/codex-session-scout list --view ops --active-within 24h
 ```
+
+The pinned operational table is `Live, Age, Status, Agent, Session, CWD, Title`; `Age` is time since the session was created and `Live` is time since the last log activity.
 
 Filter by a title fragment or id:
 
@@ -38,7 +40,7 @@ Use path-aware filtering:
 
 ```bash
 uv run ~/.agents/skills/codex-session-scout/scripts/codex-session-scout list --view paths --cwd /home/strato-space/copilot
-uv run ~/.agents/skills/codex-session-scout/scripts/codex-session-scout list --columns live,age,status,id,cwd,repo,title --repo strato-space/copilot
+uv run ~/.agents/skills/codex-session-scout/scripts/codex-session-scout list --columns live,age,status,agent_type,id,cwd,repo,title --repo strato-space/copilot
 ```
 
 Use full-text matching across raw session JSONL:
@@ -76,6 +78,7 @@ uv run ~/.agents/skills/codex-session-scout/scripts/codex-session-scout follow <
 ## Notes
 
 - The public CLI uses dash-case command names and explicit subcommands.
+- The default `ops` view shows `Agent` / `agent_type` (`user` or a subagent role such as `architect` / `code-reviewer`) when session metadata provides it.
 - The tool reads renamed thread names from `session_index.jsonl` when available.
 - `path` remains the session log file path; `cwd` and `repo` are first-class metadata surfaces when they exist in session logs.
 - The default data sources are `/root/.codex/sessions` and `/root/.codex/archived_sessions`.

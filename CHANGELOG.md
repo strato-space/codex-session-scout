@@ -1,3 +1,16 @@
+## 2026-05-30
+
+### PROBLEM SOLVED
+- Operational session lists did not identify which rows were user sessions versus Codex subagents, forcing raw JSONL inspection of `session_meta` fields.
+
+### FEATURE IMPLEMENTED
+- Codex Session Scout now derives `agent_type` from `session_meta.agent_role` / subagent spawn metadata and shows it in the default `ops` and `paths` views.
+- JSON output now includes `agent_type` and `agent_nickname` for automation.
+
+### CHANGES
+- Bumped CLI version to `2.4.0`.
+- Documented `agent_type` semantics and updated default examples.
+
 ## 2026-04-07
 
 ### PROBLEM SOLVED

@@ -17,11 +17,12 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 DEFAULT_SESSIONS_DIR = "/root/.codex/sessions"
 DEFAULT_ARCHIVED_DIR = "/root/.codex/archived_sessions"
 SESSION_INDEX_FILE = "session_index.jsonl"
+SESSION_INFO_SCAN_LIMIT = 2000
 
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-"
@@ -32,11 +33,22 @@ UUID_RE = re.compile(
 )
 DURATION_RE = re.compile(r"^(?P<value>\d+)(?P<unit>[smhd])$")
 
-VALID_COLUMNS = ("live", "age", "status", "id", "cwd", "repo", "path", "title")
+VALID_COLUMNS = ("live", "age", "status", "agent_type", "id", "cwd", "repo", "path", "title")
 VIEW_COLUMNS = {
     "summary": ("age", "title"),
-    "ops": ("live", "age", "status", "id", "cwd", "title"),
-    "paths": ("live", "age", "status", "id", "cwd", "repo", "path", "title"),
+    "ops": ("live", "age", "status", "agent_type", "id", "cwd", "title"),
+    "paths": ("live", "age", "status", "agent_type", "id", "cwd", "repo", "path", "title"),
+}
+COLUMN_LABELS = {
+    "live": "Live",
+    "age": "Age",
+    "status": "Status",
+    "agent_type": "Agent",
+    "id": "Session",
+    "cwd": "CWD",
+    "repo": "Repo",
+    "path": "Path",
+    "title": "Title",
 }
 STATUS_ORDER = {"running": 0, "completed": 1, "stale": 2}
 SOURCE_CHOICES = ("live", "all")
@@ -187,6 +199,41 @@ def derive_repo_hint(cwd: str, git_meta: object) -> str:
     return ""
 
 
+def source_subagent_spawn(source: object) -> dict:
+    if not isinstance(source, dict):
+        return {}
+    subagent = source.get("subagent")
+    if not isinstance(subagent, dict):
+        return {}
+    thread_spawn = subagent.get("thread_spawn")
+    return thread_spawn if isinstance(thread_spawn, dict) else {}
+
+
+def extract_agent_type(meta: dict) -> str:
+    agent_role = str(meta.get("agent_role") or "").strip()
+    if agent_role:
+        return agent_role
+
+    spawn = source_subagent_spawn(meta.get("source"))
+    spawn_role = str(spawn.get("agent_role") or "").strip()
+    if spawn_role:
+        return spawn_role
+
+    if meta.get("thread_source") == "subagent" or spawn:
+        return "subagent"
+    if meta.get("thread_source") == "user" or meta.get("source") == "cli":
+        return "user"
+    return ""
+
+
+def extract_agent_nickname(meta: dict) -> str:
+    nickname = str(meta.get("agent_nickname") or "").strip()
+    if nickname:
+        return nickname
+    spawn = source_subagent_spawn(meta.get("source"))
+    return str(spawn.get("agent_nickname") or "").strip()
+
+
 def format_age(ts: datetime, now: datetime) -> str:
     seconds = max(0, int((now - ts).total_seconds()))
     if seconds < 60:
@@ -320,9 +367,13 @@ def session_info(
     preview = ""
     cwd = ""
     repo = ""
+    agent_type = ""
+    agent_nickname = ""
     try:
         with open_session_text(path) as f:
-            for line in f:
+            for line_number, line in enumerate(f, start=1):
+                if line_number > SESSION_INFO_SCAN_LIMIT:
+                    break
                 try:
                     obj = json.loads(line)
                 except Exception:
@@ -342,6 +393,10 @@ def session_info(
                         cwd = find_path_hint(payload)
                     if not repo:
                         repo = derive_repo_hint(cwd, payload.get("git"))
+                    if not agent_type:
+                        agent_type = extract_agent_type(payload)
+                    if not agent_nickname:
+                        agent_nickname = extract_agent_nickname(payload)
                 elif obj.get("type") == "event_msg":
                     if payload.get("type") == "user_message" and not preview:
                         preview = extract_title_from_message(payload.get("message") or "")
@@ -349,7 +404,7 @@ def session_info(
                         cwd = find_path_hint(payload)
                     if not repo:
                         repo = derive_repo_hint(cwd, payload.get("git"))
-                if started_at and session_id and preview and cwd and repo:
+                if started_at and session_id and preview and cwd and repo and agent_type:
                     break
     except Exception:
         pass
@@ -377,6 +432,8 @@ def session_info(
         "preview": preview,
         "cwd": cwd,
         "repo": repo,
+        "agent_type": agent_type,
+        "agent_nickname": agent_nickname,
         "source": source_name,
         "path": path,
         "started_at": started_at,
@@ -452,6 +509,8 @@ def build_index_only_record(session_id: str, entry: dict[str, str]) -> dict | No
         "preview": "",
         "cwd": "",
         "repo": "",
+        "agent_type": "",
+        "agent_nickname": "",
         "source": "index",
         "path": None,
         "started_at": updated_at,
@@ -592,6 +651,16 @@ def collect_sessions(
     seen_ids: set[str] = set()
     for source_name, path in iter_session_paths(source_roots):
         session_id_from_name = extract_id_from_filename(path.name)
+        try:
+            path_stat = path.stat()
+        except OSError:
+            continue
+        path_last_activity_at = datetime.fromtimestamp(path_stat.st_mtime, tz=timezone.utc)
+        path_live_seconds = (now - path_last_activity_at).total_seconds()
+        if active_within_seconds is not None and path_live_seconds > active_within_seconds:
+            continue
+        if status_filter == {"running"} and path_live_seconds > running_window_seconds:
+            continue
         if indexed_candidate_ids is not None and session_id_from_name:
             if session_id_from_name in index_entries and session_id_from_name not in indexed_candidate_ids:
                 continue
@@ -617,10 +686,6 @@ def collect_sessions(
         _, record["completed"] = tail_session_event(path)
         record["status"] = session_status(record, now, running_window_seconds)
         live_seconds = (now - record["last_activity_at"]).total_seconds()
-        if active_within_seconds is not None and live_seconds > active_within_seconds:
-            continue
-        if status_filter == {"running"} and live_seconds > running_window_seconds:
-            continue
         if status_filter is not None and record["status"] not in status_filter:
             continue
         record["age"] = format_age(record["started_at"], now)
@@ -682,6 +747,8 @@ def record_json(record: dict) -> dict:
         "preview": record["preview"],
         "cwd": record.get("cwd") or "",
         "repo": record.get("repo") or "",
+        "agent_type": record.get("agent_type") or "",
+        "agent_nickname": record.get("agent_nickname") or "",
         "status": record["status"],
         "source": record["source"],
         "age": record["age"],
@@ -700,6 +767,8 @@ def render_column(record: dict, column: str, max_title: int) -> str:
         return record["age"]
     if column == "status":
         return record["status"]
+    if column == "agent_type":
+        return record.get("agent_type") or "-"
     if column == "id":
         return record["id"] or "-"
     if column == "cwd":
@@ -713,15 +782,24 @@ def render_column(record: dict, column: str, max_title: int) -> str:
     raise ValueError(f"Unknown column: {column}")
 
 
-def print_table(records: list[dict], columns: tuple[str, ...], max_title: int) -> None:
+def print_table(
+    records: list[dict],
+    columns: tuple[str, ...],
+    max_title: int,
+    show_header: bool = True,
+) -> None:
     rows = [[render_column(record, column, max_title) for column in columns] for record in records]
+    header = [COLUMN_LABELS[column] for column in columns]
     widths = []
     for index, column in enumerate(columns):
         values = [row[index] for row in rows]
+        if show_header:
+            values.append(header[index])
         widths.append(max((len(value) for value in values), default=0))
 
     right_aligned = {"live", "age"}
-    for row in rows:
+
+    def format_row(row: list[str]) -> str:
         formatted = []
         for index, column in enumerate(columns):
             value = row[index]
@@ -730,7 +808,12 @@ def print_table(records: list[dict], columns: tuple[str, ...], max_title: int) -
                 formatted.append(value.rjust(width))
             else:
                 formatted.append(value.ljust(width) if column != "title" else value)
-        print("  ".join(formatted).rstrip())
+        return "  ".join(formatted).rstrip()
+
+    if show_header:
+        print(format_row(header))
+    for row in rows:
+        print(format_row(row))
 
 
 def print_tsv(records: list[dict], columns: tuple[str, ...], max_title: int) -> None:
@@ -760,7 +843,15 @@ def index_only_session_by_id(source: str, session_id: str) -> dict | None:
     return build_index_only_record(session_id, entry)
 
 
-def emit_recovery_payload(recovery_kind: str, session_id: str, title: str, cwd: str, repo: str, path: str) -> dict:
+def emit_recovery_payload(
+    recovery_kind: str,
+    session_id: str,
+    title: str,
+    cwd: str,
+    repo: str,
+    path: str,
+    agent_type: str = "",
+) -> dict:
     warning = {
         "zero_byte": "Session file is zero-byte; showing index-backed metadata only.",
         "metadata_empty": "Session file has no usable metadata; showing recovery metadata only.",
@@ -773,6 +864,7 @@ def emit_recovery_payload(recovery_kind: str, session_id: str, title: str, cwd: 
             "title": title,
             "cwd": cwd,
             "repo": repo,
+            "agent_type": agent_type,
             "path": path,
             "recovery_kind": recovery_kind,
             "warning": warning,
@@ -793,6 +885,7 @@ def fetch_session(path: Path, output_format: str, source: str = "all") -> int:
             info.get("cwd") or "",
             info.get("repo") or "",
             str(path),
+            info.get("agent_type") or "",
         )
         if output_format == "jsonl":
             print(json.dumps(fallback, ensure_ascii=False))
@@ -997,6 +1090,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=96,
         help="Maximum rendered title length for table or TSV output.",
     )
+    list_parser.add_argument(
+        "--no-header",
+        action="store_true",
+        help="Do not print a header row for table output.",
+    )
     list_parser.set_defaults(func=run_list)
 
     fetch_parser = subparsers.add_parser(
@@ -1129,7 +1227,7 @@ def run_list(args: argparse.Namespace) -> int:
         print_tsv(records, columns, args.max_title)
         return 0
 
-    print_table(records, columns, args.max_title)
+    print_table(records, columns, args.max_title, show_header=not args.no_header)
     return 0
 
 
@@ -1148,6 +1246,7 @@ def run_fetch(args: argparse.Namespace) -> int:
         record.get("cwd") or "",
         record.get("repo") or "",
         "",
+        record.get("agent_type") or "",
     )
     if args.format == "jsonl":
         print(json.dumps(fallback, ensure_ascii=False))
