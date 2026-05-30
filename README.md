@@ -111,7 +111,7 @@ uv run ./codex-session-scout list --source all --fulltext-regex 'Add File: .*cod
 
 ## Agent Type
 
-The default table is pinned to the operational shape `Live, Age, Status, Agent, Session, CWD, Title`. `Agent` is backed by `agent_type`, so user-driven sessions can be separated from Codex subagents at a glance. User threads render as `user`; subagent threads render their `agent_role` when available, for example `architect`, `code-reviewer`, or `scholastic`. Structured JSON output also includes `agent_type` and `agent_nickname`.
+The default table is pinned to the operational shape `Live, Age, Status, Agent, Session, CWD, Title`. `Session` is always the full session UUID so it can be copied directly into `codex resume <session-id>`; only `Title` is affected by `--max-title`. `Agent` is backed by `agent_type`, so user-driven sessions can be separated from Codex subagents at a glance. User threads render as `user`; subagent threads render their `agent_role` when available, for example `architect`, `code-reviewer`, or `scholastic`. Structured JSON output also includes `agent_type` and `agent_nickname`.
 
 ## Status Model
 

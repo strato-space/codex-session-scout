@@ -1,3 +1,14 @@
+## 2026-05-30 v2.4.2
+
+### PROBLEM SOLVED
+- Session ids in human summaries could be abbreviated even though operators need the full value for `codex resume <session-id>`.
+
+### FEATURE IMPLEMENTED
+- Documented that the `Session` column is always a full UUID and only `Title` is truncated by `--max-title`.
+
+### CHANGES
+- Bumped CLI version to `2.4.2`.
+
 ## 2026-05-30
 
 ### PROBLEM SOLVED

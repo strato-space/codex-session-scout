@@ -22,7 +22,7 @@ Run the bundled tool directly:
 uv run ~/.agents/skills/codex-session-scout/scripts/codex-session-scout list --view ops --active-within 24h
 ```
 
-The pinned operational table is `Live, Age, Status, Agent, Session, CWD, Title`; `Age` is time since the session was created and `Live` is time since the last log activity.
+The pinned operational table is `Live, Age, Status, Agent, Session, CWD, Title`; `Age` is time since the session was created and `Live` is time since the last log activity. Always keep `Session` as the full UUID because it is copied into `codex resume <session-id>`; do not abbreviate it in summaries.
 
 Filter by a title fragment or id:
 
