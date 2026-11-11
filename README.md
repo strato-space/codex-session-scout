@@ -143,3 +143,32 @@ After installing the skill, Codex can use the tool to:
 ## License
 
 MIT
+
+## User-message transcript
+
+Use `transcript` to inspect user-authored messages in chronological order without
+printing tool output or intermediate assistant commentary:
+
+```bash
+./codex-session-scout transcript SESSION_ID
+./codex-session-scout transcript SESSION_ID --message MESSAGE_ID --message OTHER_ID --format json
+```
+
+The default JSONL output includes the event ID, source line, timestamp, turn ID,
+text, and association status; `--message` selects exact IDs and includes the
+available final answer(s). IDs use the original user item ID when available;
+`line:N` is a stable fallback while the session file is append-only. IDs are
+scoped to the session. A message with attachments may have empty text: the tool
+does not extract images or other non-text content.
+
+`matched` means exactly one user message and one final in a turn, not proof that
+the answer fulfilled the request. `ambiguous_shared_turn` means multiple user
+messages or finals share a turn; the shared finals are shown without claiming
+which message they answer. `interrupted`, `no_final`, and `unknown_turn` retain
+uncertainty. When explicit final events are absent, a completed turn's
+`last_agent_message` is used if present. System and ambient user-role messages
+are excluded when they lack user provenance. Malformed lines are counted on
+stderr. No data is sent over the network. The reader supports JSONL, gzip and
+zstd using the same local sources as `fetch`.
+
+Run tests with `python3 -m unittest discover -s tests -v`.

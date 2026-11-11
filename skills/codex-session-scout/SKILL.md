@@ -82,3 +82,19 @@ uv run ~/.agents/skills/codex-session-scout/scripts/codex-session-scout follow <
 - The tool reads renamed thread names from `session_index.jsonl` when available.
 - `path` remains the session log file path; `cwd` and `repo` are first-class metadata surfaces when they exist in session logs.
 - The default data sources are `/root/.codex/sessions` and `/root/.codex/archived_sessions`.
+
+## Inspect user requirements and outcomes
+
+```bash
+uv run ~/.codex/skills/codex-session-scout/scripts/codex-session-scout transcript SESSION_ID
+uv run ~/.codex/skills/codex-session-scout/scripts/codex-session-scout transcript SESSION_ID --message MESSAGE_ID --format json
+```
+
+The first command lists chronological user-authored messages without tool output;
+select one or more exact IDs (repeat `--message`) to include available final
+answers. IDs are session-scoped; `line:N` falls back to an append-only file line.
+`ambiguous_shared_turn` marks finals shared by multiple user messages (or
+multiple finals), not a proven one-to-one response. `interrupted`, `no_final`,
+and `unknown_turn` mean completion or linkage is unproven. Missing text may
+represent an attachment. Compare source events when accuracy matters; never
+assume a final answer proves execution. Malformed event counts go to stderr.

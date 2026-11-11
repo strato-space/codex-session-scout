@@ -19,8 +19,8 @@ from pathlib import Path
 
 __version__ = "2.4.2"
 
-DEFAULT_SESSIONS_DIR = "/root/.codex/sessions"
-DEFAULT_ARCHIVED_DIR = "/root/.codex/archived_sessions"
+DEFAULT_SESSIONS_DIR = str(Path.home() / ".codex" / "sessions")
+DEFAULT_ARCHIVED_DIR = str(Path.home() / ".codex" / "archived_sessions")
 SESSION_INDEX_FILE = "session_index.jsonl"
 SESSION_INFO_SCAN_LIMIT = 2000
 
@@ -958,6 +958,163 @@ def follow_session(
         return 1
 
 
+def content_text(content: object) -> str:
+    """Extract text blocks without inventing representations of attachments."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(block["text"] for block in content
+                     if isinstance(block, dict) and isinstance(block.get("text"), str))
+
+
+@contextmanager
+def open_transcript_text(path: Path):
+    # Unlike the live-follow reader, transcript must detect failed decompression.
+    if not path.name.endswith(".jsonl.zst"):
+        with open_session_text(path) as stream:
+            yield stream
+        return
+    proc = subprocess.Popen(["zstd", "-dc", str(path)], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    try:
+        assert proc.stdout is not None
+        yield proc.stdout
+        proc.stdout.close()
+        stderr = proc.stderr.read() if proc.stderr else ""
+        if proc.wait() != 0:
+            raise OSError("zstd decompression failed: " + stderr.strip())
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if proc.stdout:
+            proc.stdout.close()
+        if proc.stderr:
+            proc.stderr.close()
+
+
+def transcript(path: Path) -> tuple[list[dict], int]:
+    """Return user events and conservative turn-level final-answer associations."""
+    candidates = []
+    finals: dict[str, list[dict]] = {}
+    completions: dict[str, dict] = {}
+    aborted: set[str] = set()
+    current_turn = None
+    malformed = 0
+    with open_transcript_text(path) as stream:
+        for line_number, line in enumerate(stream, 1):
+            try:
+                obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    raise ValueError("not an object")
+            except (ValueError, TypeError):
+                malformed += 1
+                continue
+            payload = obj.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            kind, event = obj.get("type"), payload.get("type")
+            meta = payload.get("internal_chat_message_metadata_passthrough") or {}
+            turn = payload.get("turn_id") or (meta.get("turn_id") if isinstance(meta, dict) else None)
+            if event == "task_started" or kind == "turn_context":
+                current_turn = turn or current_turn
+            turn = turn or current_turn
+            if event == "item_completed" and isinstance(payload.get("item"), dict):
+                item = payload["item"]
+                if item.get("type") == "UserMessage":
+                    candidates.append((line_number, 0, item.get("id"), turn,
+                                       content_text(item.get("content")), obj.get("timestamp")))
+            elif kind == "event_msg" and event == "user_message":
+                candidates.append((line_number, 1, payload.get("id"), turn,
+                                   content_text(payload.get("message") or payload.get("content")), obj.get("timestamp")))
+            elif kind == "response_item" and event == "message" and payload.get("role") == "user":
+                # Only explicitly user-authored records: ambient context and instructions also have role=user.
+                metadata = meta.get("content_item_metadata", []) if isinstance(meta, dict) else []
+                if any(isinstance(m, dict) and (m.get("provenance") or {}).get("type") == "user" for m in metadata):
+                    candidates.append((line_number, 2, payload.get("id"), turn,
+                                       content_text(payload.get("content")), obj.get("timestamp")))
+            elif (kind == "response_item" and event == "message" and payload.get("role") == "assistant"
+                  and payload.get("phase") == "final_answer" and turn):
+                finals.setdefault(turn, []).append({"id": payload.get("id") or f"line:{line_number}",
+                                                    "text": content_text(payload.get("content")),
+                                                    "timestamp": obj.get("timestamp")})
+            elif kind == "event_msg" and event == "task_complete" and turn:
+                completions[turn] = {"id": f"line:{line_number}", "text": payload.get("last_agent_message") or "",
+                                     "timestamp": obj.get("timestamp")}
+                current_turn = None
+            elif kind == "event_msg" and event in ("turn_aborted", "task_failed", "task_aborted"):
+                if turn:
+                    aborted.add(turn)
+                current_turn = None
+    # The same message is frequently recorded twice in adjacent response/item events.
+    # Prefer the UI item identifier; retain repeated identical submissions when they are not adjacent.
+    selected = []
+    for candidate in sorted(candidates):
+        line, priority, ident, turn, text, timestamp = candidate
+        duplicate = next((i for i in range(len(selected) - 1, -1, -1)
+                          if line - selected[i][0] <= 3 and selected[i][3] == turn
+                          and selected[i][4] == text and selected[i][1] != priority), None)
+        if duplicate is not None:
+            if priority < selected[duplicate][1]:
+                selected[duplicate] = candidate
+        else:
+            selected.append(candidate)
+    selected.sort()
+    counts: dict[str, int] = {}
+    for _, _, _, turn, _, _ in selected:
+        if turn:
+            counts[turn] = counts.get(turn, 0) + 1
+    result = []
+    for line, _, ident, turn, text, timestamp in selected:
+        answers = finals.get(turn, []) if turn else []
+        if not answers and turn in completions and completions[turn]["text"]:
+            answers = [completions[turn]]
+        if not turn:
+            status = "unknown_turn"
+        elif turn in aborted:
+            status = "interrupted"
+        elif not answers:
+            status = "no_final"
+        elif counts[turn] != 1 or len(answers) != 1:
+            status = "ambiguous_shared_turn"
+        else:
+            status = "matched"
+        result.append({"id": ident or f"line:{line}", "line": line, "timestamp": timestamp,
+                       "turn_id": turn, "text": text, "association": status, "final_answers": answers})
+    return result, malformed
+
+
+def run_transcript(args: argparse.Namespace) -> int:
+    path = find_session_by_id(args.source, args.session_id)
+    if not path:
+        print(f"Session id not found: {args.session_id}", file=sys.stderr)
+        return 1
+    try:
+        records, malformed = transcript(path)
+    except (OSError, EOFError, subprocess.SubprocessError) as exc:
+        print(f"Failed to read session: {exc}", file=sys.stderr)
+        return 1
+    if malformed:
+        print(f"Warning: skipped {malformed} malformed event(s).", file=sys.stderr)
+    if args.message:
+        ids = set(args.message)
+        missing = ids - {record["id"] for record in records}
+        if missing:
+            print("Message id(s) not found: " + ", ".join(sorted(missing)), file=sys.stderr)
+            return 2
+        records = [record for record in records if record["id"] in ids]
+    else:
+        # Fast overview: finals are retrieved only when messages are selected.
+        records = [{k: v for k, v in record.items() if k != "final_answers"} for record in records]
+    if args.format == "json":
+        print(json.dumps(records, ensure_ascii=False, indent=2))
+    else:
+        for record in records:
+            print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-session-scout",
@@ -1111,6 +1268,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format for the fetched session.",
     )
     fetch_parser.set_defaults(func=run_fetch)
+
+    transcript_parser = subparsers.add_parser(
+        "transcript", help="List user messages and retrieve selected turn-level final answers.")
+    transcript_parser.add_argument("session_id", help="Session id to inspect.")
+    transcript_parser.add_argument("--source", choices=SOURCE_CHOICES, default="all")
+    transcript_parser.add_argument("--message", action="append", default=[], metavar="ID",
+                                   help="Select a message ID; repeat to select multiple messages.")
+    transcript_parser.add_argument("--format", choices=("jsonl", "json"), default="jsonl")
+    transcript_parser.set_defaults(func=run_transcript)
 
     follow_parser = subparsers.add_parser(
         "follow",
