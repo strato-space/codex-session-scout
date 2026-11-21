@@ -1090,13 +1090,7 @@ def transcript(path: Path) -> tuple[list[dict], int]:
     return result, malformed
 
 
-def clip_agent_text(text: str, maximum: int | None) -> str:
-    if maximum is None or len(text) <= maximum:
-        return text
-    return f"{text[:maximum]}\n[truncated: showing {maximum} of {len(text)} chars]"
-
-
-def compact_transcript(records: list[dict], max_agent_chars: int | None = None) -> str:
+def compact_transcript(records: list[dict]) -> str:
     """Render user messages with only linked final-answer evidence."""
     blocks = []
     for record in records:
@@ -1106,12 +1100,12 @@ def compact_transcript(records: list[dict], max_agent_chars: int | None = None) 
         answers = record.get("final_answers", [])
         if status == "matched":
             for answer in answers:
-                blocks.append("---AGENT\n" + clip_agent_text(answer["text"], max_agent_chars))
+                blocks.append("---AGENT\n" + answer["text"])
         elif status == "ambiguous_shared_turn":
             for index, answer in enumerate(answers, 1):
                 blocks.append(
                     f"---AGENT [ambiguous_shared_turn; candidate {index}/{len(answers)}, not attributed to this request]\n"
-                    + clip_agent_text(answer["text"], max_agent_chars)
+                    + answer["text"]
                 )
             if not answers:
                 blocks.append("---AGENT [ambiguous_shared_turn; no final answer recorded]")
@@ -1120,7 +1114,7 @@ def compact_transcript(records: list[dict], max_agent_chars: int | None = None) 
                 for answer in answers:
                     blocks.append(
                         "---AGENT [interrupted; completion is unproven]\n"
-                        + clip_agent_text(answer["text"], max_agent_chars)
+                        + answer["text"]
                     )
             else:
                 blocks.append("---AGENT [interrupted; no final answer recorded]")
@@ -1143,12 +1137,6 @@ def run_transcript(args: argparse.Namespace) -> int:
         return 1
     if malformed:
         print(f"Warning: skipped {malformed} malformed event(s).", file=sys.stderr)
-    if args.max_agent_chars is not None and args.format != "compact":
-        print("--max-agent-chars is supported only with --format compact.", file=sys.stderr)
-        return 2
-    if args.max_agent_chars is not None and args.max_agent_chars <= 0:
-        print("--max-agent-chars must be greater than 0.", file=sys.stderr)
-        return 2
     if args.message:
         ids = set(args.message)
         missing = ids - {record["id"] for record in records}
@@ -1160,7 +1148,7 @@ def run_transcript(args: argparse.Namespace) -> int:
         # Fast overview: finals are retrieved only when messages are selected.
         records = [{k: v for k, v in record.items() if k != "final_answers"} for record in records]
     if args.format == "compact":
-        rendered = compact_transcript(records, args.max_agent_chars)
+        rendered = compact_transcript(records)
         if rendered:
             print(rendered)
     elif args.format == "json":
@@ -1803,8 +1791,6 @@ def build_parser() -> argparse.ArgumentParser:
     transcript_parser.add_argument("--message", action="append", default=[], metavar="ID",
                                    help="Select a message ID; repeat to select multiple messages.")
     transcript_parser.add_argument("--format", choices=("jsonl", "json", "compact"), default="jsonl")
-    transcript_parser.add_argument("--max-agent-chars", type=int,
-                                   help="Clip each rendered final answer to this many characters (compact format only).")
     transcript_parser.set_defaults(func=run_transcript)
 
     follow_parser = subparsers.add_parser(

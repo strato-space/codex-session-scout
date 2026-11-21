@@ -5,7 +5,7 @@
 
 ### FEATURE IMPLEMENTED
 - Added `transcript --format compact` to render chronological `---USER` / `---AGENT` blocks without tool output.
-- Compact output labels ambiguous, interrupted, missing, and unlinked answers; optional `--max-agent-chars` clips long answers with an explicit marker.
+- Compact output labels ambiguous, interrupted, missing, and unlinked answers while preserving full final-answer text as stored.
 
 ### CHANGES
 - Preserved existing JSON and JSONL output behavior and bumped the CLI version to `2.6.1`.

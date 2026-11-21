@@ -171,7 +171,7 @@ printing tool output or intermediate assistant commentary:
 ```bash
 ./codex-session-scout transcript SESSION_ID
 ./codex-session-scout transcript SESSION_ID --message MESSAGE_ID --message OTHER_ID --format json
-./codex-session-scout transcript SESSION_ID --format compact --max-agent-chars 1500
+./codex-session-scout transcript SESSION_ID --format compact
 ```
 
 The default JSONL output includes the event ID, source line, timestamp, turn ID,
@@ -194,8 +194,7 @@ zstd using the same local sources as `fetch`.
 Use `--format compact` to render chronological `---USER` / `---AGENT` blocks
 without JSON metadata or tool output. Ambiguous answers are labeled as
 candidates, and missing or interrupted answers keep their status in the agent
-marker. `--max-agent-chars` optionally clips each rendered answer and prints a
-truncation marker; without it, answer text is complete. JSON and JSONL formats
-keep their existing behavior.
+marker. The complete final-answer text is preserved as stored. JSON and JSONL
+formats keep their existing behavior.
 
 Run tests with `python3 -m unittest discover -s tests -v`.

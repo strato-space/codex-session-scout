@@ -121,24 +121,24 @@ class TranscriptTests(unittest.TestCase):
         self.assertIn('---AGENT [no_final; no final answer recorded]', rendered)
         self.assertIn('---AGENT [unknown_turn; cannot link a final answer]', rendered)
 
-    def test_compact_cli_includes_answer_without_selection_and_clips(self):
+    def test_compact_cli_preserves_complete_answer_without_selection(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / 'events.jsonl'
             path.write_text(''.join(json.dumps(x) + '\n' for x in [
                 user('u', 't', 'hello'),
                 {'type': 'response_item', 'payload': {'type': 'function_call_output', 'output': 'tool secret'}},
-                final('t', 'abcdef'),
+                final('t', 'The complete response.\nSecond line, preserved exactly.'),
             ]))
             with mock.patch.object(scout, 'find_session_by_id', return_value=path):
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    args = scout.build_parser().parse_args([
-                        'transcript', 'session', '--format', 'compact', '--max-agent-chars', '3'
-                    ])
+                    args = scout.build_parser().parse_args(['transcript', 'session', '--format', 'compact'])
                     self.assertEqual(args.func(args), 0)
                 rendered = out.getvalue()
-                self.assertIn('---USER [u; matched]\nhello\n\n---AGENT\nabc', rendered)
-                self.assertIn('[truncated: showing 3 of 6 chars]', rendered)
+                self.assertIn(
+                    '---USER [u; matched]\nhello\n\n---AGENT\nThe complete response.\nSecond line, preserved exactly.',
+                    rendered,
+                )
                 self.assertNotIn('tool secret', rendered)
                 self.assertEqual(err.getvalue(), '')
 

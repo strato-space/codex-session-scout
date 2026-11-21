@@ -113,7 +113,7 @@ uncertainty instead of guessing a failing event or command.
 ```bash
 uv run ~/.codex/skills/codex-session-scout/scripts/codex-session-scout transcript SESSION_ID
 uv run ~/.codex/skills/codex-session-scout/scripts/codex-session-scout transcript SESSION_ID --message MESSAGE_ID --format json
-uv run ~/.codex/skills/codex-session-scout/scripts/codex-session-scout transcript SESSION_ID --format compact --max-agent-chars 1500
+uv run ~/.codex/skills/codex-session-scout/scripts/codex-session-scout transcript SESSION_ID --format compact
 ```
 
 The first command lists chronological user-authored messages without tool output;
@@ -128,6 +128,5 @@ assume a final answer proves execution. Malformed event counts go to stderr.
 Use `--format compact` when reviewing requests and replies across a session. It
 prints `---USER` / `---AGENT` blocks, skips tool output, and labels ambiguous,
 interrupted, missing, or unlinked answers instead of asserting a false match.
-Add `--max-agent-chars N` to clip each final answer with a visible truncation
-marker. Omit the cap to retain complete answer text. Existing JSON and JSONL
+It preserves the complete final-answer text as stored. Existing JSON and JSONL
 output is unchanged.
