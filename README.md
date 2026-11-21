@@ -14,6 +14,7 @@ It is built for the moments when the normal picker is too slow or too visual: fi
 - Filters by substring or grep-style regex against thread name, preview, or session id, with dedicated cwd/repo filters for workdir-aware lookup
 - Supports full-text and regex search inside the full JSONL session stream
 - Fetches the full JSONL or JSON payload for any session id
+- Correlates hook failures with optional read-only tmux capture, OMX native-hook logs, Codex app-server warnings/errors, and stranded OMX plugin-cache live-pin locks
 - Recovers degraded sessions from `session_index.jsonl` when the backing `.jsonl` is zero-byte or metadata-empty
 
 ## CLI Design
@@ -109,6 +110,23 @@ Regex search inside session content:
 uv run ./codex-session-scout list --source all --fulltext-regex 'Add File: .*codex-plugin-session-repair' --columns id,title
 ```
 
+Investigate a generic Codex hook failure for a known session. The pane capture is
+opt-in and read-only; no keys are sent to tmux:
+
+```bash
+uv run ./codex-session-scout diagnose SESSION_ID --tmux-pane '%0' --since 30m
+uv run ./codex-session-scout diagnose SESSION_ID --since 30m --format json
+```
+
+`diagnose` reads the session metadata, the project's `.omx/logs/native-hook-*.jsonl`,
+`CODEX_HOME/logs_2.sqlite`, and OMX plugin-cache live-pin lock metadata in
+read-only mode. It flags a stale lock whose expected stage link is missing but a
+same-inode `.reclaim` link remains—a state that can prevent required pin
+registration and make a hook exit before native-hook error logging. The command
+never removes locks or pin files. A generic TUI message still does not identify
+the failing event by itself; the output distinguishes direct evidence from a
+likely pin-registration cause.
+
 ## Agent Type
 
 The default table is pinned to the operational shape `Live, Age, Status, Agent, Session, CWD, Title`. `Session` is always the full session UUID so it can be copied directly into `codex resume <session-id>`; only `Title` is affected by `--max-title`. `Agent` is backed by `agent_type`, so user-driven sessions can be separated from Codex subagents at a glance. User threads render as `user`; subagent threads render their `agent_role` when available, for example `architect`, `code-reviewer`, or `scholastic`. Structured JSON output also includes `agent_type` and `agent_nickname`.
@@ -133,6 +151,7 @@ After installing the skill, Codex can use the tool to:
 - locate a session by title fragment, id, cwd, or repo
 - inspect recent activity
 - fetch a session and summarize the latest messages
+- correlate a hook failure with a supplied tmux pane and local hook/app logs
 
 ## Files
 
@@ -152,6 +171,7 @@ printing tool output or intermediate assistant commentary:
 ```bash
 ./codex-session-scout transcript SESSION_ID
 ./codex-session-scout transcript SESSION_ID --message MESSAGE_ID --message OTHER_ID --format json
+./codex-session-scout transcript SESSION_ID --format compact --max-agent-chars 1500
 ```
 
 The default JSONL output includes the event ID, source line, timestamp, turn ID,
@@ -170,5 +190,12 @@ uncertainty. When explicit final events are absent, a completed turn's
 are excluded when they lack user provenance. Malformed lines are counted on
 stderr. No data is sent over the network. The reader supports JSONL, gzip and
 zstd using the same local sources as `fetch`.
+
+Use `--format compact` to render chronological `---USER` / `---AGENT` blocks
+without JSON metadata or tool output. Ambiguous answers are labeled as
+candidates, and missing or interrupted answers keep their status in the agent
+marker. `--max-agent-chars` optionally clips each rendered answer and prints a
+truncation marker; without it, answer text is complete. JSON and JSONL formats
+keep their existing behavior.
 
 Run tests with `python3 -m unittest discover -s tests -v`.

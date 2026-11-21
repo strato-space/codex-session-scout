@@ -102,6 +102,55 @@ class TranscriptTests(unittest.TestCase):
                     self.assertEqual(args.func(args), 2)
                     self.assertIn('not found', err.getvalue())
 
+    def test_compact_renders_pairs_and_marks_unproven_associations(self):
+        events = [event('task_started', turn_id='shared'), user('u1', 'shared', 'first request'),
+                  user('u2', 'shared', 'follow-up'), final('shared', 'shared response'),
+                  event('task_started', turn_id='matched'), user('u3', 'matched', 'matched request'),
+                  final('matched', 'final response'), event('task_complete', turn_id='matched'),
+                  event('task_started', turn_id='interrupted'), user('u4', 'interrupted', 'interrupted request'),
+                  event('turn_aborted', turn_id='interrupted'), event('task_started', turn_id='unfinished'),
+                  user('u5', 'unfinished', 'unfinished request'),
+                  event('task_complete', turn_id='unfinished', last_agent_message=''),
+                  event('user_message', message='unknown request')]
+        records, _ = self.run_events(events)
+        rendered = scout.compact_transcript(records)
+
+        self.assertIn('---USER [u3; matched]\nmatched request\n\n---AGENT\nfinal response', rendered)
+        self.assertIn('---AGENT [ambiguous_shared_turn; candidate 1/1, not attributed to this request]', rendered)
+        self.assertIn('---AGENT [interrupted; no final answer recorded]', rendered)
+        self.assertIn('---AGENT [no_final; no final answer recorded]', rendered)
+        self.assertIn('---AGENT [unknown_turn; cannot link a final answer]', rendered)
+
+    def test_compact_cli_includes_answer_without_selection_and_clips(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'events.jsonl'
+            path.write_text(''.join(json.dumps(x) + '\n' for x in [
+                user('u', 't', 'hello'),
+                {'type': 'response_item', 'payload': {'type': 'function_call_output', 'output': 'tool secret'}},
+                final('t', 'abcdef'),
+            ]))
+            with mock.patch.object(scout, 'find_session_by_id', return_value=path):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    args = scout.build_parser().parse_args([
+                        'transcript', 'session', '--format', 'compact', '--max-agent-chars', '3'
+                    ])
+                    self.assertEqual(args.func(args), 0)
+                rendered = out.getvalue()
+                self.assertIn('---USER [u; matched]\nhello\n\n---AGENT\nabc', rendered)
+                self.assertIn('[truncated: showing 3 of 6 chars]', rendered)
+                self.assertNotIn('tool secret', rendered)
+                self.assertEqual(err.getvalue(), '')
+
+                # Existing JSONL overview still omits final answers until messages are selected.
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    args = scout.build_parser().parse_args(['transcript', 'session'])
+                    self.assertEqual(args.func(args), 0)
+                legacy = json.loads(out.getvalue())
+                self.assertNotIn('final_answers', legacy)
+                self.assertEqual(legacy['text'], 'hello')
+
     def test_multiple_finals_are_ambiguous(self):
         records, _ = self.run_events([user('u', 't', 'hello'), final('t', 'a'), final('t', 'b')])
         self.assertEqual(records[0]['association'], 'ambiguous_shared_turn')

@@ -1,3 +1,45 @@
+## 2026-11-21 v2.6.1
+
+### PROBLEM SOLVED
+- Reviewing user requests together with replies required selecting messages and reading verbose JSON metadata, increasing output size for session retrospectives.
+
+### FEATURE IMPLEMENTED
+- Added `transcript --format compact` to render chronological `---USER` / `---AGENT` blocks without tool output.
+- Compact output labels ambiguous, interrupted, missing, and unlinked answers; optional `--max-agent-chars` clips long answers with an explicit marker.
+
+### CHANGES
+- Preserved existing JSON and JSONL output behavior and bumped the CLI version to `2.6.1`.
+
+## 2026-11-21 v2.6.0
+
+### PROBLEM SOLVED
+- Generic hook failures could be caused by a stranded OMX live-pin mutation lock, but the prior diagnostic only searched dispatcher/app-server logs and could miss failures that happened before dispatch.
+
+### FEATURE IMPLEMENTED
+- Added read-only inspection of cached OMX plugin versions, mutation-lock owner PID/liveness, hard-link counts, expected stage links, same-inode `.reclaim` links, and the diagnosed session's pending/live pin state.
+- The diagnosis flags the stranded-reclaim pattern as a strong candidate for required live-pin registration failures and explains why no native-hook dispatch log may exist.
+
+### SAFETY
+- The command never deletes or repairs pin, lock, intent, or cache files.
+
+### CHANGES
+- Bumped CLI version to `2.6.0` and added fixture coverage for an orphaned reclaim hard link.
+
+## 2026-11-21 v2.5.0
+
+### PROBLEM SOLVED
+- The session transcript did not retain generic hook failures shown by the TUI, so an `exit code 1` message could not be correlated with local dispatcher or app-server diagnostics.
+
+### FEATURE IMPLEMENTED
+- Added a read-only `diagnose` command to correlate a session with optional tmux pane output, OMX `native-hook-*.jsonl` records, and Codex app-server warnings/errors from `logs_2.sqlite`.
+- Added explicit uncertainty reporting when the TUI exposes only a generic hook exit code and no diagnostic record identifies the failing event or cause.
+- Added `CODEX_HOME` support for session, archive, and app-log lookup while preserving the installed `transcript` command.
+
+### CHANGES
+- Added `diagnose SESSION_ID` with `--tmux-pane`, `--since`, `--cwd`, `--omx-log-dir`, `--codex-log-db`, `--limit`, and JSON output options.
+- Tmux inspection uses only `capture-pane`; the command never sends keys or mutates a pane. The Codex SQLite database is opened read-only.
+- Added tests for session correlation, hook/app log filtering, optional pane capture, missing logs, and missing sessions.
+
 ## 2026-05-30 v2.4.2
 
 ### PROBLEM SOLVED

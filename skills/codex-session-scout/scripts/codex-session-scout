@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import gzip
 import json
 import os
 import re
 import shutil
+import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -17,10 +20,12 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "2.4.2"
+__version__ = "2.6.1"
 
-DEFAULT_SESSIONS_DIR = str(Path.home() / ".codex" / "sessions")
-DEFAULT_ARCHIVED_DIR = str(Path.home() / ".codex" / "archived_sessions")
+_DEFAULT_CODEX_HOME = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+DEFAULT_SESSIONS_DIR = str(Path(_DEFAULT_CODEX_HOME) / "sessions")
+DEFAULT_ARCHIVED_DIR = str(Path(_DEFAULT_CODEX_HOME) / "archived_sessions")
+DEFAULT_CODEX_LOG_DB = Path(_DEFAULT_CODEX_HOME) / "logs_2.sqlite"
 SESSION_INDEX_FILE = "session_index.jsonl"
 SESSION_INFO_SCAN_LIMIT = 2000
 
@@ -1085,6 +1090,47 @@ def transcript(path: Path) -> tuple[list[dict], int]:
     return result, malformed
 
 
+def clip_agent_text(text: str, maximum: int | None) -> str:
+    if maximum is None or len(text) <= maximum:
+        return text
+    return f"{text[:maximum]}\n[truncated: showing {maximum} of {len(text)} chars]"
+
+
+def compact_transcript(records: list[dict], max_agent_chars: int | None = None) -> str:
+    """Render user messages with only linked final-answer evidence."""
+    blocks = []
+    for record in records:
+        status = record["association"]
+        user_text = record["text"] or "[No extracted text; attachment may be present.]"
+        blocks.append(f"---USER [{record['id']}; {status}]\n{user_text}")
+        answers = record.get("final_answers", [])
+        if status == "matched":
+            for answer in answers:
+                blocks.append("---AGENT\n" + clip_agent_text(answer["text"], max_agent_chars))
+        elif status == "ambiguous_shared_turn":
+            for index, answer in enumerate(answers, 1):
+                blocks.append(
+                    f"---AGENT [ambiguous_shared_turn; candidate {index}/{len(answers)}, not attributed to this request]\n"
+                    + clip_agent_text(answer["text"], max_agent_chars)
+                )
+            if not answers:
+                blocks.append("---AGENT [ambiguous_shared_turn; no final answer recorded]")
+        elif status == "interrupted":
+            if answers:
+                for answer in answers:
+                    blocks.append(
+                        "---AGENT [interrupted; completion is unproven]\n"
+                        + clip_agent_text(answer["text"], max_agent_chars)
+                    )
+            else:
+                blocks.append("---AGENT [interrupted; no final answer recorded]")
+        elif status == "no_final":
+            blocks.append("---AGENT [no_final; no final answer recorded]")
+        else:
+            blocks.append("---AGENT [unknown_turn; cannot link a final answer]")
+    return "\n\n".join(blocks)
+
+
 def run_transcript(args: argparse.Namespace) -> int:
     path = find_session_by_id(args.source, args.session_id)
     if not path:
@@ -1097,6 +1143,12 @@ def run_transcript(args: argparse.Namespace) -> int:
         return 1
     if malformed:
         print(f"Warning: skipped {malformed} malformed event(s).", file=sys.stderr)
+    if args.max_agent_chars is not None and args.format != "compact":
+        print("--max-agent-chars is supported only with --format compact.", file=sys.stderr)
+        return 2
+    if args.max_agent_chars is not None and args.max_agent_chars <= 0:
+        print("--max-agent-chars must be greater than 0.", file=sys.stderr)
+        return 2
     if args.message:
         ids = set(args.message)
         missing = ids - {record["id"] for record in records}
@@ -1104,14 +1156,451 @@ def run_transcript(args: argparse.Namespace) -> int:
             print("Message id(s) not found: " + ", ".join(sorted(missing)), file=sys.stderr)
             return 2
         records = [record for record in records if record["id"] in ids]
-    else:
+    elif args.format != "compact":
         # Fast overview: finals are retrieved only when messages are selected.
         records = [{k: v for k, v in record.items() if k != "final_answers"} for record in records]
-    if args.format == "json":
+    if args.format == "compact":
+        rendered = compact_transcript(records, args.max_agent_chars)
+        if rendered:
+            print(rendered)
+    elif args.format == "json":
         print(json.dumps(records, ensure_ascii=False, indent=2))
     else:
         for record in records:
             print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
+APP_FAILURE_RE = re.compile(r"\b(?:fail(?:ed|ure)?|error|exception|timed? ?out|exit(?:ed)? with code)\b", re.IGNORECASE)
+
+
+def redact_log_detail(value: object, max_length: int = 700) -> str:
+    """Bound and redact local diagnostic text before displaying it."""
+    text = str(value or "").replace("\x00", " ").replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [REDACTED]", text)
+    text = re.sub(
+        r"(?i)(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(r"\b(?:sk|rk)-[A-Za-z0-9_-]{16,}\b", "[REDACTED]", text)
+    if len(text) > max_length:
+        text = text[: max_length - 1] + "…"
+    return text
+
+
+def capture_tmux_pane(pane_id: str, tail_lines: int) -> dict:
+    """Capture a pane read-only; this function never sends keys or changes pane state."""
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-J", "-t", pane_id, "-S", f"-{tail_lines}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except FileNotFoundError:
+        return {"pane": pane_id, "error": "tmux executable not found", "lines": []}
+    except subprocess.TimeoutExpired:
+        return {"pane": pane_id, "error": "tmux capture timed out after 5 seconds", "lines": []}
+    except OSError as exc:
+        return {"pane": pane_id, "error": f"tmux capture failed: {exc}", "lines": []}
+    if result.returncode != 0:
+        return {
+            "pane": pane_id,
+            "error": redact_log_detail(result.stderr.strip() or f"tmux exited with code {result.returncode}", 300),
+            "lines": [],
+        }
+    return {"pane": pane_id, "error": None, "lines": result.stdout.splitlines()[-tail_lines:]}
+
+
+def read_native_hook_errors(log_dir: Path, session_id: str, since_epoch: float, limit: int) -> list[dict]:
+    """Read OMX native-hook error records, if the dispatcher managed to persist them."""
+    records = []
+    if not log_dir.is_dir():
+        return records
+    for path in sorted(log_dir.glob("native-hook-*.jsonl")):
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                for line_number, line in enumerate(stream, start=1):
+                    try:
+                        event = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    timestamp = parse_iso(str(event.get("timestamp") or ""))
+                    if timestamp is None or timestamp.timestamp() < since_epoch:
+                        continue
+                    event_session = str(event.get("session_id") or "")
+                    if event_session and event_session != session_id:
+                        continue
+                    if not (event.get("error") or "error" in str(event.get("type") or "").lower()):
+                        continue
+                    records.append({
+                        "timestamp": timestamp.isoformat(),
+                        "type": str(event.get("type") or ""),
+                        "hook_event_name": str(event.get("hook_event_name") or "Unknown"),
+                        "session_id": event_session or None,
+                        "turn_id": event.get("turn_id"),
+                        "error": redact_log_detail(event.get("error")),
+                        "path": str(path),
+                        "line": line_number,
+                    })
+        except OSError:
+            continue
+    records.sort(key=lambda record: record["timestamp"])
+    return records[-limit:]
+
+
+def read_small_json_file(path: Path, max_bytes: int = 4096) -> dict | None:
+    """Read a bounded regular JSON file without following a final symlink."""
+    fd = None
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            return None
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as stream:
+            fd = None
+            raw = stream.read(max_bytes + 1)
+        if len(raw.encode("utf-8", errors="replace")) > max_bytes:
+            return None
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def process_liveness(pid: int) -> str:
+    """Return a cautious local liveness classification for a numeric PID."""
+    try:
+        os.kill(pid, 0)
+        return "alive"
+    except ProcessLookupError:
+        return "exited"
+    except PermissionError:
+        return "unknown"
+    except (OSError, OverflowError, ValueError):
+        return "unknown"
+
+
+def read_omx_plugin_cache_pin_locks(codex_home: Path, session_id: str) -> dict:
+    """Inspect OMX live-pin mutation locks read-only; never reclaim or remove them."""
+    cache_base = codex_home / "plugins" / "cache" / "oh-my-codex-local" / "oh-my-codex"
+    result = {"path": str(cache_base), "error": None, "records": []}
+    try:
+        cache_stat = cache_base.lstat()
+    except OSError:
+        result["error"] = "OMX plugin cache not found"
+        return result
+    if not stat.S_ISDIR(cache_stat.st_mode):
+        result["error"] = "OMX plugin cache is not a real directory; skipped"
+        return result
+
+    session_hash = hashlib.sha256(session_id.strip().encode("utf-8")).hexdigest()
+    try:
+        versions = list(cache_base.iterdir())
+    except OSError as exc:
+        result["error"] = f"Unable to inspect OMX plugin cache: {redact_log_detail(exc, 240)}"
+        return result
+
+    for version_dir in versions[:200]:
+        try:
+            version_stat = version_dir.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISDIR(version_stat.st_mode):
+            continue
+        manifest = read_small_json_file(version_dir / ".codex-plugin" / "plugin.json", 16 * 1024)
+        version = manifest.get("version") if manifest and manifest.get("name") == "oh-my-codex" else None
+        if not isinstance(version, str) or version != version_dir.name:
+            continue
+
+        version_hash = hashlib.sha256(version.encode("utf-8")).hexdigest()[:24]
+        lock_path = cache_base / f".omx-live-pin-{version_hash}.lock"
+        try:
+            lock_stat = lock_path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_size > 256:
+            result["records"].append({
+                "version": version,
+                "status": "untrusted_lock_file",
+                "link_count": lock_stat.st_nlink,
+                "lock_mtime": datetime.fromtimestamp(lock_stat.st_mtime, tz=timezone.utc).isoformat(),
+                "session_pin_present": False,
+                "session_intent_present": False,
+            })
+            continue
+
+        record = read_small_json_file(lock_path, 256)
+        pid = record.get("pid") if record else None
+        token = record.get("token") if record else None
+        valid_record = (
+            record is not None
+            and record.get("version") == 1
+            and isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and pid > 0
+            and record.get("operation") in {"pin", "retire"}
+            and isinstance(token, str)
+            and UUID_RE.fullmatch(token) is not None
+        )
+        owner_state = process_liveness(pid) if valid_record else "unknown"
+        stage_path = lock_path.with_name(f"{lock_path.name}.stage-{pid}-{token}") if valid_record else None
+        stage_matches = False
+        if stage_path is not None:
+            try:
+                stage_stat = stage_path.lstat()
+                stage_matches = (stage_stat.st_dev, stage_stat.st_ino) == (lock_stat.st_dev, lock_stat.st_ino)
+            except OSError:
+                pass
+
+        reclaim_links = 0
+        if valid_record and lock_stat.st_nlink > 1 and not stage_matches:
+            try:
+                for sibling in cache_base.iterdir():
+                    if ".reclaim-" not in sibling.name:
+                        continue
+                    try:
+                        sibling_stat = sibling.lstat()
+                    except OSError:
+                        continue
+                    if (sibling_stat.st_dev, sibling_stat.st_ino) == (lock_stat.st_dev, lock_stat.st_ino):
+                        reclaim_links += 1
+            except OSError:
+                pass
+
+        pin_dir = cache_base / ".omx-pins" / version
+        session_pin_present = False
+        try:
+            pin_dir_stat = pin_dir.lstat()
+            if stat.S_ISDIR(pin_dir_stat.st_mode):
+                for pin_path in list(pin_dir.glob("pin-*.json"))[:1000]:
+                    pin_record = read_small_json_file(pin_path, 4096)
+                    if pin_record and pin_record.get("sessionHash") == session_hash:
+                        session_pin_present = True
+                        break
+        except OSError:
+            pass
+        pending_path = pin_dir / f".pending-{session_hash}.json"
+        intent_path = cache_base / f".omx-live-pin-intent-{version_hash}-{session_hash}.json"
+        session_intent_present = any(path.is_file() and not path.is_symlink() for path in (pending_path, intent_path))
+
+        status = "unrecognized_lock"
+        if valid_record and owner_state == "exited" and lock_stat.st_nlink == 2 and not stage_matches and reclaim_links:
+            status = "orphaned_reclaim_hardlink"
+        elif valid_record and owner_state == "exited" and lock_stat.st_nlink > 1 and not stage_matches:
+            status = "orphaned_extra_hardlink"
+        elif valid_record and owner_state == "exited":
+            status = "stale_lock"
+        elif valid_record and owner_state == "alive":
+            status = "owner_alive"
+        elif valid_record:
+            status = "owner_liveness_unknown"
+
+        result["records"].append({
+            "version": version,
+            "status": status,
+            "operation": record.get("operation") if valid_record else None,
+            "owner_pid": pid if valid_record else None,
+            "owner_state": owner_state,
+            "link_count": lock_stat.st_nlink,
+            "expected_stage_present": stage_matches,
+            "same_inode_reclaim_links": reclaim_links,
+            "lock_mtime": datetime.fromtimestamp(lock_stat.st_mtime, tz=timezone.utc).isoformat(),
+            "session_pin_present": session_pin_present,
+            "session_intent_present": session_intent_present,
+        })
+
+    return result
+
+
+def read_codex_app_log_errors(db_path: Path, session_id: str, since_epoch: float, limit: int) -> dict:
+    """Read recent Codex app-server warnings/errors from logs_2.sqlite in read-only mode."""
+    result = {"path": str(db_path), "error": None, "records": []}
+    if not db_path.is_file():
+        result["error"] = "Codex app log database not found"
+        return result
+    connection = None
+    try:
+        connection = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.25)
+        connection.execute("PRAGMA query_only = ON")
+        table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='logs'").fetchone()
+        if not table:
+            result["error"] = "logs table not found in Codex app log database"
+            return result
+        rows = connection.execute(
+            """SELECT ts, level, target, module_path, line, thread_id, feedback_log_body
+               FROM logs WHERE ts >= ? AND ts <= ?
+               AND (upper(level) IN ('WARN', 'WARNING', 'ERROR') OR lower(target) LIKE '%hook%')
+               ORDER BY ts DESC, ts_nanos DESC LIMIT 1000""",
+            (since_epoch, time.time()),
+        ).fetchall()
+        for ts, level, target, module_path, line, thread_id, body in rows:
+            level = str(level or "")
+            target = str(target or "")
+            body = str(body or "")
+            thread_id = str(thread_id or "")
+            hook_failure = "hook" in (target + " " + str(module_path or "") + " " + body).lower() and bool(APP_FAILURE_RE.search(body))
+            if level.upper() not in {"WARN", "WARNING", "ERROR"} and not hook_failure:
+                continue
+            trace_ids = re.findall(
+                r"(?:thread\.id|conversation\.id|thread_id|conversation_id)\s*=\s*([A-Za-z0-9._-]+)",
+                body,
+                re.IGNORECASE,
+            )
+            if thread_id and thread_id != session_id and session_id not in body:
+                continue
+            if not thread_id and trace_ids and session_id not in trace_ids:
+                continue
+            result["records"].append({
+                "timestamp": datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat(),
+                "level": level,
+                "target": target,
+                "module_path": str(module_path or ""),
+                "line": line,
+                "thread_id": thread_id or None,
+                "scope": "session" if thread_id == session_id or session_id in body else "process-wide",
+                "detail": redact_log_detail(body),
+            })
+        result["records"].sort(key=lambda record: record["timestamp"])
+        result["records"] = result["records"][-limit:]
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        result["error"] = f"Unable to read Codex app log database: {redact_log_detail(exc, 300)}"
+    finally:
+        if connection is not None:
+            connection.close()
+    return result
+
+
+def render_diagnosis(report: dict) -> None:
+    session = report["session"]
+    print(f"Session: {session['id']}")
+    print(f"Title: {session['title']}")
+    print(f"CWD: {session['cwd'] or '(not recorded)'}")
+    print(f"Transcript: {session['path']}")
+    print(f"Window: since {report['since']} (UTC)")
+
+    pane = report.get("tmux")
+    if pane is not None:
+        print(f"\n--- tmux pane {pane['pane']} (read-only capture) ---")
+        if pane.get("error"):
+            print(f"Capture unavailable: {pane['error']}")
+        else:
+            for line in pane["lines"]:
+                print(line)
+            print(f"Visible hook-failure markers: {report['summary']['visible_hook_failures']}")
+
+    hook_errors = report["omx_native_hook_errors"]
+    print("\n--- OMX native-hook error records ---")
+    if hook_errors:
+        for record in hook_errors:
+            print(f"{record['timestamp']} {record['hook_event_name']} {record['type']}: {record['error']}")
+    else:
+        print("No matching native-hook error record was found in the selected .omx/logs directory.")
+
+    app_logs = report["codex_app_logs"]
+    print("\n--- Codex app-server warnings/errors ---")
+    if app_logs.get("error"):
+        print(f"Unavailable: {app_logs['error']} ({app_logs['path']})")
+    elif app_logs["records"]:
+        for record in app_logs["records"]:
+            print(f"{record['timestamp']} {record['level']} {record['target']} [{record['scope']}]: {record['detail']}")
+    else:
+        print("No matching warnings/errors were found in the selected time window.")
+
+    pin_locks = report["omx_plugin_cache_pin_locks"]
+    print("\n--- OMX plugin-cache live-pin locks (read-only) ---")
+    if pin_locks.get("error"):
+        print(f"Unavailable: {pin_locks['error']} ({pin_locks['path']})")
+    elif pin_locks["records"]:
+        for record in pin_locks["records"]:
+            print(
+                f"version {record['version']}: {record['status']} "
+                f"(pid={record['owner_pid']}, owner={record['owner_state']}, "
+                f"nlink={record['link_count']}, session pin={'present' if record['session_pin_present'] else 'absent'}, "
+                f"session intent={'present' if record['session_intent_present'] else 'absent'})"
+            )
+            if record["status"] == "orphaned_reclaim_hardlink":
+                print(
+                    "  Expected stage link is missing but an extra hard link remains under a .reclaim name. "
+                    "This can block safe stale-lock recovery and required pin registration."
+                )
+                if not record["session_pin_present"] and record["session_intent_present"]:
+                    print(
+                        "  Strong candidate for this session's generic hook exit 1: the session has a pending "
+                        "intent but no registered live pin. The native hook may exit before dispatcher logging."
+                    )
+    else:
+        print("No OMX plugin-cache live-pin mutation lock was found for cached plugin versions.")
+    print("No pin, lock, intent, or cache file was changed by this diagnosis.")
+
+    print("\nInterpretation limit: the TUI message 'Hook failed / hook exited with code 1' proves only that a configured hook process returned non-zero; it does not identify the hook event or root cause by itself.")
+    if report["summary"]["visible_hook_failures"] and not hook_errors:
+        print("No OMX native-hook error record was captured. The failure may have occurred before OMX's dispatcher logged it, in another configured hook, or while the local error log was unavailable; this absence does not prove which.")
+
+
+def run_diagnose(args: argparse.Namespace) -> int:
+    if args.tail_lines < 1 or args.tail_lines > 1000:
+        print("--tail-lines must be between 1 and 1000.", file=sys.stderr)
+        return 2
+    if args.limit < 1 or args.limit > 500:
+        print("--limit must be between 1 and 500.", file=sys.stderr)
+        return 2
+    path = find_session_by_id(args.source, args.session_id)
+    if not path:
+        print(f"Session id not found: {args.session_id}", file=sys.stderr)
+        return 1
+    source_roots = build_source_roots(args.source)
+    index_entries = load_session_index_entries(source_roots)
+    info = session_info(path, args.source, index_entries=index_entries)
+    cwd = args.cwd or info.get("cwd") or ""
+    since_epoch = time.time() - args.since
+    since = datetime.fromtimestamp(since_epoch, tz=timezone.utc).isoformat()
+    tmux = capture_tmux_pane(args.tmux_pane, args.tail_lines) if args.tmux_pane else None
+    pane_lines = tmux.get("lines", []) if tmux else []
+    visible_failures = sum(len(re.findall(r"\bHook failed\b", line, re.IGNORECASE)) for line in pane_lines)
+    log_dir = Path(args.omx_log_dir) if args.omx_log_dir else (Path(cwd) / ".omx" / "logs" if cwd else None)
+    native_errors = read_native_hook_errors(log_dir, args.session_id, since_epoch, args.limit) if log_dir else []
+    app_logs = read_codex_app_log_errors(Path(args.codex_log_db), args.session_id, since_epoch, args.limit)
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    pin_locks = read_omx_plugin_cache_pin_locks(codex_home, args.session_id)
+    report = {
+        "session": {
+            "id": args.session_id,
+            "title": info.get("title") or "(untitled session)",
+            "cwd": cwd,
+            "path": str(path),
+            "agent_type": info.get("agent_type") or "",
+        },
+        "since": since,
+        "tmux": tmux,
+        "omx_native_hook_log_dir": str(log_dir) if log_dir else None,
+        "omx_native_hook_errors": native_errors,
+        "codex_app_logs": app_logs,
+        "omx_plugin_cache_pin_locks": pin_locks,
+        "summary": {
+            "visible_hook_failures": visible_failures,
+            "recorded_omx_native_hook_errors": len(native_errors),
+            "codex_app_log_warnings_errors": len(app_logs["records"]),
+            "omx_plugin_cache_pin_lock_records": len(pin_locks["records"]),
+            "orphaned_omx_plugin_pin_locks": sum(
+                record.get("status") == "orphaned_reclaim_hardlink"
+                for record in pin_locks["records"]
+            ),
+        },
+    }
+    if args.format == "json":
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        render_diagnosis(report)
     return 0
 
 
@@ -1269,13 +1758,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch_parser.set_defaults(func=run_fetch)
 
+    diagnose_parser = subparsers.add_parser(
+        "diagnose",
+        help="Collect read-only session, hook-log, Codex app-log, and optional tmux evidence.",
+    )
+    diagnose_parser.add_argument("session_id", help="Full session id to correlate with local diagnostics.")
+    diagnose_parser.add_argument(
+        "--source", choices=SOURCE_CHOICES, default="all",
+        help="Read only live sessions or include archived sessions as well.",
+    )
+    diagnose_parser.add_argument(
+        "--since", type=parse_duration, default=parse_duration("30m"), metavar="DURATION",
+        help="Include local error logs from this time window, e.g. 10m or 2h. Default: 30m.",
+    )
+    diagnose_parser.add_argument(
+        "--tmux-pane", metavar="PANE",
+        help="Explicitly capture a tmux pane read-only (for example %%0); no keys are sent.",
+    )
+    diagnose_parser.add_argument(
+        "--tail-lines", type=int, default=100,
+        help="Maximum tmux pane tail to capture when --tmux-pane is set. Default: 100.",
+    )
+    diagnose_parser.add_argument(
+        "--cwd", help="Override the session cwd when locating the project's .omx/logs directory.",
+    )
+    diagnose_parser.add_argument(
+        "--omx-log-dir", help="Override the directory containing native-hook-*.jsonl diagnostics.",
+    )
+    diagnose_parser.add_argument(
+        "--codex-log-db", type=Path, default=DEFAULT_CODEX_LOG_DB,
+        help="Read-only Codex app log database path. Default: CODEX_HOME/logs_2.sqlite.",
+    )
+    diagnose_parser.add_argument(
+        "--limit", type=int, default=100,
+        help="Maximum matching native-hook and Codex app log records to show (1-500). Default: 100.",
+    )
+    diagnose_parser.add_argument("--format", choices=("text", "json"), default="text")
+    diagnose_parser.set_defaults(func=run_diagnose)
+
     transcript_parser = subparsers.add_parser(
         "transcript", help="List user messages and retrieve selected turn-level final answers.")
     transcript_parser.add_argument("session_id", help="Session id to inspect.")
     transcript_parser.add_argument("--source", choices=SOURCE_CHOICES, default="all")
     transcript_parser.add_argument("--message", action="append", default=[], metavar="ID",
                                    help="Select a message ID; repeat to select multiple messages.")
-    transcript_parser.add_argument("--format", choices=("jsonl", "json"), default="jsonl")
+    transcript_parser.add_argument("--format", choices=("jsonl", "json", "compact"), default="jsonl")
+    transcript_parser.add_argument("--max-agent-chars", type=int,
+                                   help="Clip each rendered final answer to this many characters (compact format only).")
     transcript_parser.set_defaults(func=run_transcript)
 
     follow_parser = subparsers.add_parser(
