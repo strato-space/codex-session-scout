@@ -51,20 +51,30 @@
 ### CHANGES
 - Bumped CLI version to `2.4.2`.
 
-## 2026-05-30
+## 2026-05-30 v2.4.1
 
 ### PROBLEM SOLVED
-- Operational session lists did not identify which rows were user sessions versus Codex subagents, forcing raw JSONL inspection of `session_meta` fields.
+- Ordinary `--query` / `--regex` filters could scan raw session logs, slowing metadata lookups on large session trees.
 
 ### FEATURE IMPLEMENTED
-- Codex Session Scout now derives `agent_type` from `session_meta.agent_role` / subagent spawn metadata and shows it in the default `ops` and `paths` views.
-- JSON output now includes `agent_type` and `agent_nickname` for automation.
+- Keeps title/id metadata filters responsive by avoiding full-log searches unless the user opts into `--fulltext` or `--fulltext-regex`.
 
 ### CHANGES
 - Bumped CLI version to `2.4.1`.
-- Documented `agent_type` semantics and updated default examples.
 
-## 2026-04-07
+## 2026-05-30 v2.4.0
+
+### PROBLEM SOLVED
+- Operational session lists did not distinguish user threads from Codex subagents without inspecting raw `session_meta` data.
+
+### FEATURE IMPLEMENTED
+- Added the default operational columns `Live`, `Age`, `Status`, `Agent`, `Session`, `CWD`, and `Title`; `Agent` is derived from session metadata.
+- Added `agent_type` and `agent_nickname` to JSON output, and bounded metadata scanning to keep active-session views responsive on large logs.
+
+### CHANGES
+- Bumped CLI version to `2.4.0` and documented agent metadata in the README and skill.
+
+## 2026-04-07 v2.3.0
 
 ### PROBLEM SOLVED
 - Zero-byte Codex session files could effectively disappear from operational lookup even when `session_index.jsonl` still had the thread name, making incident recovery slower and inconsistent.
@@ -80,3 +90,26 @@
 - Added `session_index.jsonl`-backed recovery metadata for zero-byte and metadata-empty sessions; `fetch --format json` now returns a `session_recovery` payload for degraded cases.
 - Tightened recovery after review: full-text queries no longer leak index-only ghost sessions, and readable non-zero session files now keep returning their real event stream even when metadata is sparse.
 - Updated `README.md`, `skills/codex-session-scout/SKILL.md`, and `skills/codex-session-scout/agents/openai.yaml` to document cwd/repo-aware lookup and degraded-session recovery.
+- Bumped CLI version to `2.3.0` and restored the skill script's executable mode.
+
+## 2026-03-26 v2.1.0
+
+### PROBLEM SOLVED
+- Session lookup could find a thread by metadata but could not search its full event text or match content with regular expressions.
+
+### FEATURE IMPLEMENTED
+- Added full-text and regex search across session content, separate from metadata-only filters.
+
+### CHANGES
+- Bumped CLI version to `2.1.0` and documented the new search options.
+
+## 2026-03-26 v2.0.0
+
+### PROBLEM SOLVED
+- The CLI relied on implicit command behavior and positional grep shortcuts that made its interface ambiguous.
+
+### FEATURE IMPLEMENTED
+- Redesigned the CLI around explicit `list` and `fetch` subcommands and made filtering and output selection explicit.
+
+### CHANGES
+- Bumped CLI version to `2.0.0` and adopted the public `codex-session-scout` dash-case executable name.
