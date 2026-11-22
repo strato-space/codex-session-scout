@@ -1,3 +1,10 @@
+## Unreleased
+
+### DOCUMENTATION
+- Clarified that transcript associations and session statuses are derived from local log evidence and do not prove task outcomes or process state; documented filtered-list status artifacts around index fallback.
+- Documented that compact transcripts preserve all extracted request and final-reply text without display truncation, while omitting non-text content and tool output.
+- Made transcript review easier to discover in the README, skill workflow, and skill listing metadata.
+
 ## 2026-11-21 v2.6.1
 
 ### PROBLEM SOLVED

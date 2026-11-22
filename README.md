@@ -133,11 +133,56 @@ The default table is pinned to the operational shape `Live, Age, Status, Agent, 
 
 ## Status Model
 
-- `running`: recent live activity and the latest event is not `task_complete`
-- `completed`: the latest event is `task_complete`
-- `stale`: not completed, but no longer active in the current live window
+- `running`: for a session-file record, effective activity time is within the running window and the last nonempty line does not parse as a `task_complete` event
+- `completed`: for a session-file record, the last nonempty line parses as a `task_complete` event
+- `stale`: a session-file record has no recent activity and no latest `task_complete` event; every record emitted by the index fallback is also marked `stale`
 
 Use `--running-window 5m` to control when a session is considered live. Use `--active-within 24h` when you want a filter, not a status threshold.
+
+The effective activity time is the file's modification time, except that a zero-byte session file uses `session_index.jsonl`'s `updated_at` when available. These are operational labels inferred from local records, not a direct check of whether a Codex process or thread is alive. A recent zero-byte or unreadable session file can be labeled `running` because no `task_complete` event can be read. `stale` does not prove that a thread was stopped, cancelled, or abandoned.
+
+Known filter limitation: filtering happens before session IDs are marked as seen. If a file-backed record is filtered out, the index fallback can emit the same ID as `stale` even though its session file exists. As a result, `--status stale` may show sessions whose file record was `running` or `completed`; `--status running` may omit those records. `--active-within` prefilters by file modification time before applying the zero-byte index timestamp fallback, so a zero-byte session with recent index activity may reappear as `stale`. For a status check, start with an unfiltered list and inspect the session with `fetch` if the result matters.
+
+## User-message transcript
+
+Use `transcript` to inspect user-authored messages in chronological order without
+printing tool output or intermediate assistant commentary:
+
+```bash
+./codex-session-scout transcript SESSION_ID
+./codex-session-scout transcript SESSION_ID --message MESSAGE_ID --message OTHER_ID --format json
+./codex-session-scout transcript SESSION_ID --format compact
+```
+
+The command reconstructs user messages from the local session log and associates
+available final-answer text with them using recorded turn information. The
+association describes the log structure; it does not establish that the answer
+fulfilled the request or that a reported action ran. Use `fetch` to inspect
+recorded events and tool results when execution matters, and interpret that
+evidence separately.
+
+The default JSONL output includes the message ID, source line, timestamp, turn ID,
+text, and association status; `--message` selects exact IDs and includes the
+available final answer text. IDs use the original user item ID when available;
+`line:N` is a stable fallback while the session file is append-only. IDs are
+scoped to the session. A message with attachments may have empty text: the tool
+does not extract images or other non-text content.
+
+`matched` means exactly one user message and one final in a recorded turn, not
+proof that the answer fulfilled the request. `ambiguous_shared_turn` means
+multiple user messages or finals share a turn; the shared finals are shown as
+candidates without claiming which message they answer. `interrupted`, `no_final`,
+and `unknown_turn` preserve uncertainty. When explicit final events are absent,
+a completed turn's `last_agent_message` is used if present. System and ambient
+user-role messages are excluded when they lack user provenance. Malformed lines
+are counted on stderr. No data is sent over the network. The reader supports
+JSONL, gzip, and zstd using the same local sources as `fetch`.
+
+Use `--format compact` to render chronological `---USER` / `---AGENT` blocks
+without JSON metadata or tool output. It retains full extracted text without
+display truncation, labels ambiguous answers as candidates, and keeps missing or
+interrupted status in the agent marker. Non-text content such as images is not
+extracted. JSON and JSONL formats keep their existing behavior.
 
 ## Skill
 
@@ -151,6 +196,7 @@ After installing the skill, Codex can use the tool to:
 - locate a session by title fragment, id, cwd, or repo
 - inspect recent activity
 - fetch a session and summarize the latest messages
+- inspect user requests and their recorded final replies without truncating extracted text
 - correlate a hook failure with a supplied tmux pane and local hook/app logs
 
 ## Files
@@ -159,42 +205,10 @@ After installing the skill, Codex can use the tool to:
 - [`skills/codex-session-scout/scripts/codex-session-scout`](./skills/codex-session-scout/scripts/codex-session-scout): core implementation
 - [`skills/codex-session-scout/SKILL.md`](./skills/codex-session-scout/SKILL.md): reusable skill definition
 
+## Development
+
+Run tests with `python3 -m unittest discover -s tests -v`.
+
 ## License
 
 MIT
-
-## User-message transcript
-
-Use `transcript` to inspect user-authored messages in chronological order without
-printing tool output or intermediate assistant commentary:
-
-```bash
-./codex-session-scout transcript SESSION_ID
-./codex-session-scout transcript SESSION_ID --message MESSAGE_ID --message OTHER_ID --format json
-./codex-session-scout transcript SESSION_ID --format compact
-```
-
-The default JSONL output includes the event ID, source line, timestamp, turn ID,
-text, and association status; `--message` selects exact IDs and includes the
-available final answer(s). IDs use the original user item ID when available;
-`line:N` is a stable fallback while the session file is append-only. IDs are
-scoped to the session. A message with attachments may have empty text: the tool
-does not extract images or other non-text content.
-
-`matched` means exactly one user message and one final in a turn, not proof that
-the answer fulfilled the request. `ambiguous_shared_turn` means multiple user
-messages or finals share a turn; the shared finals are shown without claiming
-which message they answer. `interrupted`, `no_final`, and `unknown_turn` retain
-uncertainty. When explicit final events are absent, a completed turn's
-`last_agent_message` is used if present. System and ambient user-role messages
-are excluded when they lack user provenance. Malformed lines are counted on
-stderr. No data is sent over the network. The reader supports JSONL, gzip and
-zstd using the same local sources as `fetch`.
-
-Use `--format compact` to render chronological `---USER` / `---AGENT` blocks
-without JSON metadata or tool output. Ambiguous answers are labeled as
-candidates, and missing or interrupted answers keep their status in the agent
-marker. The complete final-answer text is preserved as stored. JSON and JSONL
-formats keep their existing behavior.
-
-Run tests with `python3 -m unittest discover -s tests -v`.
