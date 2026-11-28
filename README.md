@@ -184,13 +184,23 @@ display truncation, labels ambiguous answers as candidates, and keeps missing or
 interrupted status in the agent marker. Non-text content such as images is not
 extracted. JSON and JSONL formats keep their existing behavior.
 
-## Skill
+## Skills
 
-This repository includes an installable Codex skill at:
+This repository includes two installable Codex skills:
 
-`skills/codex-session-scout`
+- `skills/codex-session-scout` — inspect local Codex sessions and transcripts.
+- `skills/close-session` — produce a durable session handoff and close-out.
 
-After installing the skill, Codex can use the tool to:
+Link them into a Codex skills directory so the repository remains the canonical source:
+
+```sh
+skills_dir="${CODEX_HOME:-$HOME/.codex}/skills"
+mkdir -p "$skills_dir"
+ln -sfn "$PWD/skills/codex-session-scout" "$skills_dir/codex-session-scout"
+ln -sfn "$PWD/skills/close-session" "$skills_dir/close-session"
+```
+
+After installing `codex-session-scout`, Codex can use the tool to:
 
 - find active sessions
 - locate a session by title fragment, id, cwd, or repo
@@ -199,11 +209,19 @@ After installing the skill, Codex can use the tool to:
 - inspect user requests and their recorded final replies without truncating extracted text
 - correlate a hook failure with a supplied tmux pane and local hook/app logs
 
+After installing `close-session`, Codex can use it to:
+
+- inspect the current session with `codex-session-scout` before writing the handoff
+- preserve open work, decisions, tests, and unblock items in a durable location
+- commit session-owned changes when safe and recommend whether to archive the session
+
 ## Files
 
 - [`codex-session-scout`](./codex-session-scout): root launcher
 - [`skills/codex-session-scout/scripts/codex-session-scout`](./skills/codex-session-scout/scripts/codex-session-scout): core implementation
 - [`skills/codex-session-scout/SKILL.md`](./skills/codex-session-scout/SKILL.md): reusable skill definition
+- [`skills/close-session/SKILL.md`](./skills/close-session/SKILL.md): durable session close-out workflow
+- [`skills/close-session/REVIEW.md`](./skills/close-session/REVIEW.md): audit and repair rationale for the skill
 
 ## Development
 

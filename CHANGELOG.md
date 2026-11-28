@@ -1,6 +1,10 @@
 ## Unreleased
 
+### FEATURE IMPLEMENTED
+- Added the version-controlled `close-session` skill at `skills/close-session`, using the latest 2026-11-28 revision and preserving its audit notes and baseline.
+
 ### DOCUMENTATION
+- Documented symlink installation for both bundled skills and added `close-session` to the README skill overview.
 - Clarified that transcript associations and session statuses are derived from local log evidence and do not prove task outcomes or process state; documented filtered-list status artifacts around index fallback.
 - Documented that compact transcripts preserve all extracted request and final-reply text without display truncation, while omitting non-text content and tool output.
 - Made transcript review easier to discover in the README, skill workflow, and skill listing metadata.
