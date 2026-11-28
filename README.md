@@ -191,13 +191,22 @@ This repository includes two installable Codex skills:
 - `skills/codex-session-scout` — inspect local Codex sessions and transcripts.
 - `skills/close-session` — produce a durable session handoff and close-out.
 
-Link them into a Codex skills directory so the repository remains the canonical source:
+Codex and dcodex both include `~/.agents/skills` as a shared skill root. Link both skills there once; per-`CODEX_HOME` copies are unnecessary.
 
 ```sh
-skills_dir="${CODEX_HOME:-$HOME/.codex}/skills"
+skills_dir="$HOME/.agents/skills"
 mkdir -p "$skills_dir"
 ln -sfn "$PWD/skills/codex-session-scout" "$skills_dir/codex-session-scout"
 ln -sfn "$PWD/skills/close-session" "$skills_dir/close-session"
+```
+
+Hermes does not read `~/.agents/skills`, so link the skills into its own tree when using them there:
+
+```sh
+hermes_dir="$HOME/.hermes/skills/codex-imports"
+mkdir -p "$hermes_dir"
+ln -sfn "$PWD/skills/codex-session-scout" "$hermes_dir/codex-session-scout"
+ln -sfn "$PWD/skills/close-session" "$hermes_dir/close-session"
 ```
 
 After installing `codex-session-scout`, Codex can use the tool to:
